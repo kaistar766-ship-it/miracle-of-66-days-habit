@@ -1,0 +1,61 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Project
+
+A single-page to-do list app with a "streak" challenge feature and multi-profile support (Netflix-style profile picker), built as pure vanilla HTML/CSS/JS with **no build tools, frameworks, or external libraries**. The original spec lives in `todo-app-PRD.md`, written as a sequence of five copy-paste prompts (1단계~5단계); the 5-stage plan is done, and the app has since grown with user-requested features layered on top (visual redesign, header habit-start-date/daily-quote, JSON export/import backup, user-defined categories, multiple profiles, a synthesized BGM player, a date/time/weather widget, customizable heatmap achievement stamps). When asked to continue implementation, read the current state of `app.js`/`index.html` rather than assuming the PRD's stage list is still the full picture — it documents where the app started, not where it is now.
+
+## Running / verifying
+
+There is no build step, package manager, or test runner in this repo (no `package.json`). To run the app:
+
+```bash
+open index.html   # macOS, opens via file:// in the default browser
+```
+
+The app must work when `index.html` is opened directly via `file://` (double-click), so:
+- `app.js` is loaded as a classic `<script>`, **not** `type="module"` — this keeps top-level `function` declarations on `window`, which is required for manual verification via the browser console.
+- Never introduce `fetch`, ES module imports, or anything that requires a server — `file://` has no origin for CORS/module loading to work against.
+- Console testing of anything data-related (e.g. `addTodo("테스트", "work")`) only works **after** picking a profile — `currentProfileId` is `null` until `enterApp()` runs, so calls made on the bare profile-picker screen write to a bogus `"...null"` key instead of throwing.
+
+There are no automated tests. Verification is manual, per the "완료 확인" checklist at the end of each PRD stage — typically: perform the action in the browser, check `localStorage` via devtools console, reload and confirm state persists, confirm no console errors.
+
+## Architecture
+
+**Strict separation of data layer from UI.** `app.js` implements to-do CRUD (`addTodo`, `updateTodo`, `deleteTodo`, `toggleDone`) and challenge/streak logic as pure functions decoupled from rendering — UI wiring (event listeners, `renderTodos()`) is layered on top in later stages without changing these function signatures.
+
+**Persistence is per-profile.** `todoapp.profiles` is the one global, unscoped key (the list of profiles). Every other key — todos, challenge, last-used category, categories — is passed through `scopedKey(baseKey)` before touching `localStorage`, which appends `"." + currentProfileId`. `currentProfileId` lives only in memory (never persisted), set by `enterApp(profileId)` when a profile tile is clicked; reloading the page always lands back on the profile picker. The one exception is `LEGACY_PROFILE_ID` ("legacy"): data saved before profiles existed keeps its original unscoped keys, and `scopedKey` special-cases that id to skip the suffix so old data isn't orphaned — `loadProfiles()` auto-creates a "기본 프로필" entry with that id the first time it detects unscoped legacy data still present.
+- `todoapp.todos` (+ `.<profileId>`) — array of to-do items (`loadTodos()` / `saveTodos()`)
+- `todoapp.challenge` (+ `.<profileId>`) — single challenge/streak object (`loadChallenge()` / `saveChallenge()`)
+- `todoapp.lastCategory` (+ `.<profileId>`) — last-used category id, for the add-form default (`loadLastCategory()` / `saveLastCategory()`)
+- `todoapp.categories` (+ `.<profileId>`) — array of category objects, built-ins + user-added (`loadCategories()` / `saveCategories()`)
+- `todoapp.profiles` — array of `{ id, name, color, photo }`, global, not scoped (`loadProfiles()` / `saveProfiles()`)
+
+Because `currentProfileId` must be set before any of the scoped load/save functions are meaningful, the whole existing init sequence (todo form, category management, challenge, backup, etc.) is wrapped in `initMainApp()`, which only runs once — from `enterApp()` after a profile is chosen. Nothing in that sequence runs at script-load time anymore; the only thing that runs unconditionally at the bottom of `app.js` is `initProfilePicker()`. Don't add new init calls back to unconditional top-level script execution — they belong inside `initMainApp()` (if they need a profile) or `initProfilePicker()` (if they're picker-screen-only).
+
+Data shapes (mirrored in `app.js`):
+- Todo item: `{ id, text, category, done, completedAt, createdAt }` — `id` is `String(Date.now())`, `category` is a category `id` (see below), `createdAt` is local-time `YYYY-MM-DD` (via `todayStr()`, **not** UTC), `completedAt` is an ISO timestamp or `null`.
+- Challenge: `{ targetDays, rule, minCount, currentStreak, bestStreak, lastAchievedDate, history, startDate }` — default on first run is `targetDays: 30, rule: "min_count", minCount: 1, currentStreak: 0, bestStreak: 0, lastAchievedDate: null, history: [], startDate: todayStr()`. `history` is capped at the most recent 60 days; `startDate` is backfilled on load for older saved data that predates the field.
+- Category: `{ id, label, color }` — `color` is a hex string used to derive both the solid tag text color and its translucent chip background (`hexToRgba`). `BUILT_IN_CATEGORIES` (`work`/`personal`/`study`) can't be deleted (`isBuiltInCategory`); user-added ones get an id from `generateId("cat-")`. Deleting a custom category reassigns any of its to-dos to `"work"` (see `deleteCategory`) — don't let a category disappear while to-dos still reference it.
+- Profile: `{ id, name, color, photo }` — `photo` is either `null` (falls back to a colored initial-letter avatar) or a JPEG data URL produced by `readImageAsResizedDataUrl()`, which square-crops and downscales to keep `localStorage` usage bounded. New profile/category ids both go through `generateId(prefix)` (`Date.now()` + a random suffix) — plain `Date.now()` alone can collide if two are created within the same millisecond (this bit a profile-deletion test during development: two colliding ids meant deleting one deleted both).
+
+Every place that used to assume a fixed 3-category enum now reads from `loadCategories()` at render time (`renderTodos`, `renderProgress`, the add-form select, the filter tabs) — if you touch category-related rendering, keep it data-driven rather than reintroducing a hardcoded list.
+
+Every CRUD/challenge mutation function loads the current array/object, mutates, and calls the corresponding `save*` immediately — there is no separate "dirty state" or batched save.
+
+**Storage error hook (NFR-5):** `loadTodos`/`saveTodos`/`loadChallenge`/`saveChallenge` wrap `localStorage` access in try/catch and route failures through `notifyStorageError(message)`, which calls a handler registered via `setStorageErrorHandler(fn)` (falls back to `console.error` if none is registered). Later stages wire this handler to an actual toast UI — don't bypass it with direct `console.error`/`alert` calls in new code.
+
+**Streak/date logic (stage 4) is intentionally strict about local time.** `todayStr()` must use local `Date` getters, not `toISOString()`, since UTC would shift the date near midnight in non-UTC timezones. Any new date comparison logic should reuse `todayStr()`/`dayDiff()` rather than reimplementing date math.
+
+**Two top-level screens, toggled via `hidden`**: `#profile-picker-screen` (profile grid + add/manage) and `#app-root` (everything else, originally the whole page). Exactly one is visible at a time — `enterApp()` flips both. Inside `#app-root`, the original PRD §7 backbone still holds: header → progress section → input section → filter tabs → to-do list → challenge section. Three more sections — input (할 일 추가), category management, and data backup — plus a settings-actions section (save/cancel) are all "infrequently used" and hidden by default; all four share the single `challengeSettingsOpen` boolean and get shown/hidden together at the end of `renderChallenge()`, opened via the challenge section's "⚙ 설정" button. Keep containers semantic (`header`, `nav`, `main`, `section` with `aria-label`) rather than generic `div` soup.
+
+**`[hidden]` vs. author CSS specificity**: an author-stylesheet rule like `#todo-form { display: flex }` or `.profile-picker-screen { display: flex }` beats the UA stylesheet's `[hidden] { display: none }` regardless of specificity, because UA-origin rules always lose to author-origin rules at equal-or-lower specificity. Any element you toggle via `.hidden = true/false` that also has its own `display` rule needs an explicit `#id[hidden], .class[hidden] { display: none; }` override, or it'll silently stay visible. This has bitten this codebase twice (`#todo-form`, `.profile-picker-screen`) — check for it whenever a newly-hidden element doesn't disappear.
+
+**Sections whose content is entirely rebuilt on render** (`container.innerHTML = ""` then re-appended) vs. **sections wired once and left alone**: `renderTodos`/`renderProgress`/`renderChallenge` clear and rebuild their container every call; `renderFilterTabs` similarly rebuilds the category tab buttons (but preserves the static "전체" button by detaching/re-appending it) whenever categories change. Click/change/submit listeners are attached once at init via delegation on the stable parent container (`initTodoListEvents`, `initChallengeEvents`, `initCategoryManagement`, `initFilterTabs`) — never add a listener inside a render function, or it will be duplicated on every re-render.
+
+## Constraints from the PRD
+
+- No build tools, no frameworks (React/Vue/etc.), no external JS/CSS libraries — everything ships as the three files `index.html`, `style.css`, `app.js`.
+- Filtering only affects what's displayed in the to-do list; progress percentages (FR-4) are always computed over the full unfiltered set.
+- Category colors are per-category hex values (see Data shapes above), applied via inline styles at render time — not CSS classes/custom properties, since user-added categories don't exist at CSS-authoring time.
