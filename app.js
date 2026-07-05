@@ -471,24 +471,23 @@ function restoreTodo(todo, index) {
 
 var HISTORY_MAX_DAYS = 60;
 
-// today 기준 달성 여부 순수 계산. isTodayAchieved()의 실제 구현.
-function computeAchieved(todos, challenge, today) {
-  var todayTodos = todos.filter(function (t) {
-    return t.createdAt === today;
-  });
-  var completedCount = todayTodos.filter(function (t) {
+// 오늘 달성 여부 순수 계산. isTodayAchieved()의 실제 구현.
+// 할 일은 매일 반복되는 습관 목표이므로(생성일과 무관하게) 전체 목록을 기준으로 판정한다 —
+// "오늘 몇 개를 체크했는가"는 done 플래그로 판단하며, done은 resetDailyCompletionOnLoad()가 매일 초기화해 둔다.
+function computeAchieved(todos, challenge) {
+  var completedCount = todos.filter(function (t) {
     return t.done;
   }).length;
 
   if (challenge.rule === "all_done") {
-    return todayTodos.length > 0 && completedCount === todayTodos.length;
+    return todos.length > 0 && completedCount === todos.length;
   }
   return completedCount >= challenge.minCount; // rule === "min_count"
 }
 
 // FR-5.2: rule에 따라 오늘 달성 여부를 반환한다.
 function isTodayAchieved(todos, challenge) {
-  return computeAchieved(todos, challenge, todayStr());
+  return computeAchieved(todos, challenge);
 }
 
 // checkStreakOnLoad()의 순수 로직: lastAchievedDate와 today의 차이가 2일 이상이면
@@ -514,6 +513,30 @@ function checkStreakOnLoad() {
   return updated;
 }
 
+// computeDailyReset()의 순수 로직: 할 일은 삭제하지 않고 계속 유지되는 습관 목표이므로,
+// 완료 체크만 "오늘 다시 해야 하는 일"로 매일 초기화한다. completedAt이 오늘이 아닌 done 항목만 되돌린다
+// (같은 날 안에서는 재실행돼도 아무 것도 바뀌지 않아야 하므로 completedAt의 날짜로 판단한다).
+function computeDailyReset(todos, today) {
+  return todos.map(function (t) {
+    if (!t.done) return t;
+    var completedDate = t.completedAt ? formatDateLocal(new Date(t.completedAt)) : null;
+    if (completedDate === today) return t;
+    return Object.assign({}, t, { done: false, completedAt: null });
+  });
+}
+
+// FR-habit: 앱 실행 시 1회만 호출해야 한다 (초기화 블록에서 호출). 사용자가 설정한 목표(항목) 자체는
+// 그대로 유지한 채, 어제 이전에 체크된 완료 상태만 초기화해 매일 다시 체크하도록 한다.
+function resetDailyCompletionOnLoad() {
+  var todos = loadTodos();
+  var updated = computeDailyReset(todos, todayStr());
+  var changed = updated.some(function (t, i) {
+    return t !== todos[i];
+  });
+  if (changed) saveTodos(updated);
+  return updated;
+}
+
 // history는 최근 60일만 보관, 초과분은 오래된 것부터 제거한다 (오름차순 정렬 가정).
 function trimHistory(history) {
   if (history.length <= HISTORY_MAX_DAYS) return history;
@@ -527,7 +550,7 @@ function trimHistory(history) {
 // - 그 외(상태 변화 없음): 아무 것도 하지 않는다.
 function computeMarkAchieved(todos, challenge, today) {
   var next = Object.assign({}, challenge, { history: challenge.history.slice() });
-  var achievedToday = computeAchieved(todos, next, today);
+  var achievedToday = computeAchieved(todos, next);
   var alreadyMarkedToday = next.lastAchievedDate === today;
 
   if (achievedToday && !alreadyMarkedToday) {
@@ -611,6 +634,18 @@ function runStreakSelfTests() {
   assert("체크 해제 시 history에서 오늘이 제거된다", afterRollback.history.indexOf("2024-01-04") === -1);
   assert("체크 해제 후에도 bestStreak는 감소하지 않는다", afterRollback.bestStreak === 3);
 
+  // 시나리오: 습관 목표는 삭제되지 않고, 어제 이전에 체크된 완료 상태만 매일 초기화된다.
+  var todosFromYesterday = [
+    { id: "1", text: "어제 체크함", category: "work", done: true, completedAt: "2024-01-03T12:00:00.000", createdAt: "2024-01-01" },
+    { id: "2", text: "오늘 이미 체크함", category: "work", done: true, completedAt: "2024-01-04T12:00:00.000", createdAt: "2024-01-01" },
+    { id: "3", text: "아직 미완료", category: "work", done: false, completedAt: null, createdAt: "2024-01-01" },
+  ];
+  var afterDailyReset = computeDailyReset(todosFromYesterday, "2024-01-04");
+  assert("어제 체크한 항목은 오늘 done이 초기화된다", afterDailyReset[0].done === false && afterDailyReset[0].completedAt === null);
+  assert("오늘 이미 체크한 항목은 그대로 유지된다", afterDailyReset[1].done === true);
+  assert("미완료 항목은 영향받지 않는다", afterDailyReset[2].done === false);
+  assert("초기화 후에도 항목 자체(텍스트)는 삭제되지 않고 유지된다", afterDailyReset[0].text === "어제 체크함");
+
   var passed = results.filter(function (r) {
     return r.pass;
   }).length;
@@ -658,12 +693,10 @@ var challengeSettingsOpen = false;
 var pendingDelete = null;
 var pendingDeleteTimer = null;
 
-// 오늘(createdAt 기준) 생성된 할 일 전체 — 필터 적용 전, 진행률 계산은 항상 이 목록 기준.
-function getTodayTodos() {
-  var today = todayStr();
-  return loadTodos().filter(function (t) {
-    return t.createdAt === today;
-  });
+// 매일 반복되는 습관 목표 전체(카테고리 필터 적용 전) — 진행률 계산은 항상 이 목록 기준.
+// 항목 자체는 삭제 전까지 계속 유지되고, done만 resetDailyCompletionOnLoad()가 매일 초기화한다.
+function getActiveTodos() {
+  return loadTodos();
 }
 
 function createTodoItemElement(todo, categories, categoryMap) {
@@ -734,16 +767,16 @@ function createTodoItemElement(todo, categories, categoryMap) {
   return li;
 }
 
-// 목록 전체를 다시 그린다. 오늘 생성된 항목 중 현재 필터에 맞는 것만, 미완료 우선으로 표시한다 (FR-1.5, FR-2.2, FR-3.3).
+// 목록 전체를 다시 그린다. 습관 목표 중 현재 필터에 맞는 것만, 미완료 우선으로 표시한다 (FR-1.5, FR-2.2, FR-3.3).
 function renderTodos() {
   var listEl = document.getElementById("todo-list");
   var categories = loadCategories();
   var categoryMap = buildCategoryMap(categories);
-  var todayTodos = getTodayTodos();
+  var activeTodos = getActiveTodos();
   var filteredTodos =
     currentFilter === "all"
-      ? todayTodos
-      : todayTodos.filter(function (t) {
+      ? activeTodos
+      : activeTodos.filter(function (t) {
           return t.category === currentFilter;
         });
 
@@ -853,23 +886,23 @@ function createProgressBar(percent, colorHex) {
   return bar;
 }
 
-// 전체/카테고리별 진행률을 그린다. 필터와 무관하게 항상 오늘 전체 항목 기준이다 (FR-4.1~4.3).
+// 전체/카테고리별 진행률을 그린다. 필터와 무관하게 항상 전체 습관 목표 기준이다 (FR-4.1~4.3).
 function renderProgress() {
   var container = document.getElementById("progress-section");
   container.innerHTML = "";
 
-  var todayTodos = getTodayTodos();
-  var total = todayTodos.length;
+  var activeTodos = getActiveTodos();
+  var total = activeTodos.length;
 
   if (total === 0) {
     var emptyMsg = document.createElement("p");
     emptyMsg.className = "progress-empty";
-    emptyMsg.textContent = "📝 오늘의 할 일을 추가해 보세요";
+    emptyMsg.textContent = "🎯 습관 목표를 추가해 보세요";
     container.appendChild(emptyMsg);
     return;
   }
 
-  var completed = todayTodos.filter(function (t) {
+  var completed = activeTodos.filter(function (t) {
     return t.done;
   }).length;
   var percent = Math.round((completed / total) * 100);
@@ -887,7 +920,7 @@ function renderProgress() {
   categoryList.className = "category-progress-list";
 
   loadCategories().forEach(function (cat) {
-    var categoryTodos = todayTodos.filter(function (t) {
+    var categoryTodos = activeTodos.filter(function (t) {
       return t.category === cat.id;
     });
     var catTotal = categoryTodos.length;
@@ -2103,6 +2136,7 @@ function initDateTimeWeather() {
 function initMainApp() {
   loadChallenge();
   checkStreakOnLoad(); // 프로필 진입 시 1회만 호출 (FR-5.4)
+  resetDailyCompletionOnLoad(); // 프로필 진입 시 1회만 호출 — 어제 이전 완료 체크만 초기화, 목표 항목 자체는 유지
   loadCategories(); // 이 프로필에서 처음 진입 시 기본 카테고리 3종을 저장해 둔다.
   initTodoForm();
   initTodoListEvents();
