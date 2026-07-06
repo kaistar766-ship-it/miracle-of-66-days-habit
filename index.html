@@ -41,7 +41,8 @@
     <header class="app-header">
       <div class="header-titles">
         <h1>Miracle of 66 Days Habit</h1>
-        <p id="habit-start-date" class="habit-start-date"></p>
+        <p id="habit-start-date" class="habit-start-date" tabindex="0" role="button" aria-label="시작일 변경"></p>
+        <input type="date" id="start-date-input" class="start-date-input" hidden />
         <p id="daily-quote" class="daily-quote"></p>
       </div>
       <button type="button" id="switch-profile-btn" class="switch-profile-btn">프로필 전환</button>
@@ -74,6 +75,7 @@
     </nav>
 
     <main id="todo-list-section" class="app-section" aria-label="할 일 목록">
+      <p id="start-date-notice" class="start-date-notice" hidden></p>
       <ul id="todo-list"></ul>
     </main>
 

@@ -10,7 +10,7 @@
  *                           loadLastCategory/saveLastCategory (모두 try-catch로 감싸고
  *                           실패 시 notifyStorageError → showErrorToast로 안내). todoapp.profiles만
  *                           빼고 나머지 키는 전부 scopedKey()를 거쳐 프로필별로 분리 저장된다.
- *   - 날짜 유틸:            todayStr, dayDiff, addDays, getRecentDates (전부 로컬 시간 기준)
+ *   - 날짜 유틸:            todayStr, dayDiff, addDays, getChallengeDates (전부 로컬 시간 기준)
  *   - 할 일 CRUD:           addTodo/updateTodo/deleteTodo/toggleDone/restoreTodo (UI와 분리된 순수 함수)
  *   - 챌린지(streak) 로직:  isTodayAchieved/checkStreakOnLoad/markAchievedIfNeeded는 각각
  *                           computeAchieved/computeStreakReset/computeMarkAchieved라는 순수 계산
@@ -34,6 +34,7 @@ var STORAGE_KEYS = {
   CHALLENGE: "todoapp.challenge",
   LAST_CATEGORY: "todoapp.lastCategory",
   CATEGORIES: "todoapp.categories",
+  CHALLENGE_ARCHIVE: "todoapp.challengeArchive",
 };
 
 // 프로필 개념 도입 전(단일 사용자 시절)에 저장된 데이터를 위한 특수 프로필 id.
@@ -80,6 +81,7 @@ function getDefaultChallenge() {
     stampShape: "circle",
     stampColor: "#ec4899",
     stampText: "참 잘했어요!",
+    hasArchivedCurrentGoal: false,
   };
 }
 
@@ -134,6 +136,10 @@ function loadChallenge() {
       parsed.stampText = "참 잘했어요!";
       needsBackfill = true;
     }
+    if (typeof parsed.hasArchivedCurrentGoal !== "boolean") {
+      parsed.hasArchivedCurrentGoal = false;
+      needsBackfill = true;
+    }
     if (needsBackfill) saveChallenge(parsed);
 
     return parsed;
@@ -146,6 +152,29 @@ function loadChallenge() {
 function saveChallenge(challenge) {
   try {
     localStorage.setItem(scopedKey(STORAGE_KEYS.CHALLENGE), JSON.stringify(challenge));
+    return true;
+  } catch (e) {
+    notifyStorageError("저장에 실패했습니다. 브라우저 저장 공간을 확인해 주세요.");
+    return false;
+  }
+}
+
+// 완료한 챌린지들의 스냅샷 목록(트로피/뱃지용) — 챌린지가 초기화돼도 이 기록은 지워지지 않는다.
+function loadChallengeArchive() {
+  try {
+    var raw = localStorage.getItem(scopedKey(STORAGE_KEYS.CHALLENGE_ARCHIVE));
+    if (!raw) return [];
+    var parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    notifyStorageError("완료 기록을 불러오지 못했습니다.");
+    return [];
+  }
+}
+
+function saveChallengeArchive(archive) {
+  try {
+    localStorage.setItem(scopedKey(STORAGE_KEYS.CHALLENGE_ARCHIVE), JSON.stringify(archive));
     return true;
   } catch (e) {
     notifyStorageError("저장에 실패했습니다. 브라우저 저장 공간을 확인해 주세요.");
@@ -328,24 +357,31 @@ function addDays(dateStr, delta) {
   return formatDateLocal(d);
 }
 
-// today를 포함해 이전 n일치 날짜 문자열을 오래된 순으로 반환한다 (히트맵용).
-function getRecentDates(n, today) {
+// startDate부터 시작해 n일치 날짜 문자열을 순서대로 반환한다 (히트맵용).
+// "최근 n일" 창을 오늘 기준으로 매일 미끄러뜨리는 대신, 챌린지 시작일에 고정된 자리를 준다 —
+// 실물 달력에 1일부터 순서대로 도장을 찍는 것처럼, 한 번 채워진 칸은 다음날에도 같은 자리에 남아야 한다.
+function getChallengeDates(startDate, n) {
   var dates = [];
-  for (var i = n - 1; i >= 0; i--) {
-    dates.push(addDays(today, -i));
+  for (var i = 0; i < n; i++) {
+    dates.push(addDays(startDate, i));
   }
   return dates;
 }
 
 /* ===== 헤더 표시 정보: 습관 시작일 / 오늘의 명언 ===== */
 
-// "YYYY-MM-DD" → "2026년 7월 5일부터 시작"
-function formatStartDateLabel(dateStr) {
+// "YYYY-MM-DD" → "2026년 7월 5일"
+function formatKoreanDate(dateStr) {
   var parts = dateStr.split("-");
-  var year = Number(parts[0]);
-  var month = Number(parts[1]);
-  var day = Number(parts[2]);
-  return year + "년 " + month + "월 " + day + "일부터 시작";
+  return Number(parts[0]) + "년 " + Number(parts[1]) + "월 " + Number(parts[2]) + "일";
+}
+
+// 헤더에 시작일/종료일을 두 줄로 보여준다. 종료일은 히트맵의 마지막 칸과 항상 같은 날짜여야 하므로
+// totalHeatmapDays(연장분 포함)를 그대로 넘겨받아 계산한다 — 놓친 날로 연장된 경우 "(+N일 연장)"을 덧붙인다.
+function formatChallengeDateRangeLabel(startDate, totalHeatmapDays, bonusDays) {
+  var endDate = addDays(startDate, totalHeatmapDays - 1);
+  var endSuffix = bonusDays > 0 ? "(+" + bonusDays + "일 연장)" : "";
+  return "시작일: " + formatKoreanDate(startDate) + "\n종료일: " + formatKoreanDate(endDate) + endSuffix;
 }
 
 var SUCCESS_QUOTES = [
@@ -525,6 +561,17 @@ function computeDailyReset(todos, today) {
   });
 }
 
+// computeDailyReset()과 달리 오늘 체크한 것까지 전부 되돌린다 — "새 챌린지 설정"으로 챌린지를
+// 1일차부터 다시 시작할 때 전용이다. 이걸 안 하면 오늘 이미 체크해 둔 할 일이 새 챌린지의 1일차를
+// 저장하자마자 다시 "달성"시켜 버려서, 설정을 저장할 때마다 완료 기록이 계속 쌓이는 버그가 생긴다
+// (goalReached → 리셋 → 오늘 체크 상태로 즉시 재달성 → 다음 저장 때 또 goalReached인 무한 루프).
+function computeResetAllCompletion(todos) {
+  return todos.map(function (t) {
+    if (!t.done) return t;
+    return Object.assign({}, t, { done: false, completedAt: null });
+  });
+}
+
 // FR-habit: 앱 실행 시 1회만 호출해야 한다 (초기화 블록에서 호출). 사용자가 설정한 목표(항목) 자체는
 // 그대로 유지한 채, 어제 이전에 체크된 완료 상태만 초기화해 매일 다시 체크하도록 한다.
 function resetDailyCompletionOnLoad() {
@@ -580,6 +627,39 @@ function markAchievedIfNeeded() {
   var updated = computeMarkAchieved(todos, challenge, today);
   saveChallenge(updated);
   return updated;
+}
+
+// 완료된 챌린지를 아카이브에 남길 때 쓸 스냅샷 하나를 만드는 순수 계산.
+// totalDays는 실제로 걸린 일수(연장분 포함) — targetDays만 보여주면 "놓친 날 때문에 하루 더 걸렸다"는
+// 사실이 기록에서 사라지므로, 시작일~달성일 사이 실제 경과일을 그대로 남긴다.
+function computeArchiveEntry(challenge) {
+  return {
+    id: generateId("archive-"),
+    startDate: challenge.startDate,
+    endDate: challenge.lastAchievedDate,
+    targetDays: challenge.targetDays,
+    totalDays: dayDiff(challenge.startDate, challenge.lastAchievedDate) + 1,
+    stampShape: challenge.stampShape,
+    stampColor: challenge.stampColor,
+    stampText: challenge.stampText,
+  };
+}
+
+// 목표(targetDays일 연속)를 처음 달성한 순간 딱 한 번만 완료 기록을 아카이브에 남긴다.
+// challenge.hasArchivedCurrentGoal로 중복 기록을 막는다 — 이 값은 "새 챌린지 설정" 저장 시에만 다시
+// false로 풀린다(saveChallengeSettingsFromInputs 참고), 그래야 목표 달성 후에도 계속 앱을 쓰는 동안
+// 매 렌더링마다 같은 완료가 아카이브에 쌓이지 않는다.
+function archiveCompletedChallengeIfNeeded() {
+  var challenge = loadChallenge();
+  if (challenge.currentStreak < challenge.targetDays) return;
+  if (challenge.hasArchivedCurrentGoal) return;
+
+  var archive = loadChallengeArchive();
+  archive.push(computeArchiveEntry(challenge));
+  saveChallengeArchive(archive);
+
+  challenge.hasArchivedCurrentGoal = true;
+  saveChallenge(challenge);
 }
 
 // 완료 확인 체크리스트를 검증하는 자가 테스트. 실제 localStorage는 건드리지 않는다.
@@ -646,6 +726,20 @@ function runStreakSelfTests() {
   assert("미완료 항목은 영향받지 않는다", afterDailyReset[2].done === false);
   assert("초기화 후에도 항목 자체(텍스트)는 삭제되지 않고 유지된다", afterDailyReset[0].text === "어제 체크함");
 
+  // 시나리오: "새 챌린지 설정"으로 리셋할 땐 오늘 체크한 것까지 전부 되돌아가야 한다 — 그래야 오늘 이미
+  // 체크된 할 일이 새 챌린지 1일차를 즉시 재달성시켜 저장할 때마다 완료 기록이 중복 쌓이는 걸 막는다.
+  var todosIncludingToday = [
+    { id: "1", text: "오늘 체크함", category: "work", done: true, completedAt: "2024-01-04T12:00:00.000", createdAt: "2024-01-01" },
+    { id: "2", text: "미완료", category: "work", done: false, completedAt: null, createdAt: "2024-01-01" },
+  ];
+  var afterFullReset = computeResetAllCompletion(todosIncludingToday);
+  assert(
+    "새 챌린지 리셋 시 오늘 체크한 항목도 초기화된다",
+    afterFullReset[0].done === false && afterFullReset[0].completedAt === null
+  );
+  assert("새 챌린지 리셋 후에도 항목 자체는 유지된다", afterFullReset[0].text === "오늘 체크함");
+  assert("이미 미완료였던 항목은 그대로다", afterFullReset[1].done === false);
+
   var passed = results.filter(function (r) {
     return r.pass;
   }).length;
@@ -699,7 +793,7 @@ function getActiveTodos() {
   return loadTodos();
 }
 
-function createTodoItemElement(todo, categories, categoryMap) {
+function createTodoItemElement(todo, categories, categoryMap, checkInDisabled) {
   var li = document.createElement("li");
   li.className = "todo-item" + (todo.done ? " done" : "");
   li.dataset.id = todo.id;
@@ -735,6 +829,10 @@ function createTodoItemElement(todo, categories, categoryMap) {
     checkbox.type = "checkbox";
     checkbox.className = "todo-toggle";
     checkbox.checked = todo.done;
+    if (checkInDisabled) {
+      checkbox.disabled = true;
+      checkbox.title = "챌린지 시작일부터 체크할 수 있어요";
+    }
 
     var category = categoryMap[todo.category] || { label: todo.category, color: "#6b7280" };
     var categoryLabel = document.createElement("span");
@@ -788,9 +886,21 @@ function renderTodos() {
   });
   var ordered = incomplete.concat(completed);
 
+  // 챌린지 시작일을 미래로 설정해 둔 경우, 시작일 전까지는 할 일을 추가만 하고 체크는 못 하게 막는다.
+  var challenge = loadChallenge();
+  var challengeNotStarted = todayStr() < challenge.startDate;
+
+  var notice = document.getElementById("start-date-notice");
+  if (challengeNotStarted) {
+    notice.textContent = "🔒 " + formatKoreanDate(challenge.startDate) + "부터 체크할 수 있어요";
+    notice.hidden = false;
+  } else {
+    notice.hidden = true;
+  }
+
   listEl.innerHTML = "";
   ordered.forEach(function (todo) {
-    listEl.appendChild(createTodoItemElement(todo, categories, categoryMap));
+    listEl.appendChild(createTodoItemElement(todo, categories, categoryMap, challengeNotStarted));
   });
 
   if (editingId) {
@@ -1055,12 +1165,30 @@ function saveChallengeSettingsFromInputs() {
   if (!stampText) return;
 
   var challenge = loadChallenge();
+  var wasGoalReached = challenge.currentStreak >= challenge.targetDays;
+
   challenge.targetDays = targetDays;
   challenge.rule = rule;
   challenge.minCount = minCount;
   challenge.stampShape = stampShape;
   challenge.stampColor = stampColor;
   challenge.stampText = stampText;
+
+  // 목표 달성 후의 "새 챌린지 설정" 저장은 진짜 새 챌린지의 시작이므로, 히트맵/연속기록이 1일차부터
+  // 다시 채워지도록 초기화한다. (완료했던 챌린지 자체는 이미 archiveCompletedChallengeIfNeeded()가
+  // 아카이브에 남겨 놓았으니 여기서 지워도 기록이 사라지지 않는다.) bestStreak(최고 기록)는 전체 역대
+  // 기록이므로 초기화하지 않는다. 오늘 이미 체크해 둔 할 일도 함께 초기화해야 한다 — 그대로 두면
+  // renderAll()의 markAchievedIfNeeded()가 그 체크만으로 새 챌린지의 1일차를 즉시 재달성시켜 버려서,
+  // 저장을 누를 때마다 완료 기록이 계속 쌓이는 버그가 생긴다.
+  if (wasGoalReached) {
+    challenge.startDate = todayStr();
+    challenge.history = [];
+    challenge.currentStreak = 0;
+    challenge.lastAchievedDate = null;
+    challenge.hasArchivedCurrentGoal = false;
+    saveTodos(computeResetAllCompletion(loadTodos()));
+  }
+
   saveChallenge(challenge);
 
   challengeSettingsOpen = false;
@@ -1072,25 +1200,38 @@ function cancelChallengeSettings() {
   renderAll();
 }
 
-// 히트맵에 표시할 일수는 목표일 수(targetDays)를 그대로 따른다.
+// 히트맵에 표시할 총 일수. 목표는 "targetDays일 연속 성공"이므로, 이미 지나간 날 중 실패한(달성 못한)
+// 날은 연속 기록에서 빠지고 그만큼 뒤에 칸이 더 필요해진다 — 그 실패가 확정되는 즉시(며칠이 더 지나길
+// 기다리지 않고) 칸을 늘려서 목표가 멀어졌다는 걸 바로 시각적으로 보여준다. 단, 오늘은 아직 하루가
+// 끝나지 않았으니 아직 체크 전이라도 실패로 세지 않는다 — 완전히 지나간 날만 실패 여부를 판정한다.
 function getHeatmapDayCount(challenge) {
-  return challenge.targetDays;
+  var elapsedDaysBeforeToday = dayDiff(challenge.startDate, todayStr());
+  var missedDays = 0;
+  for (var i = 0; i < elapsedDaysBeforeToday; i++) {
+    if (challenge.history.indexOf(addDays(challenge.startDate, i)) === -1) missedDays++;
+  }
+  return challenge.targetDays + missedDays;
 }
 
 // 목표일 수(targetDays)에 맞춘 달성 히트맵을 순수 CSS grid로 그린다 (FR-5.5).
+// 챌린지 시작일(startDate)에 1일차를 고정하고 앞으로 채워나간다 — "최근 n일" 창을 오늘 기준으로
+// 매일 미끄러뜨리면 이미 찍힌 도장이 매일 자리를 옮기며 밀려나는 것처럼 보이기 때문에, 실물 달력처럼
+// 한 번 정해진 칸은 그대로 두고 다음 칸에 도장을 찍는 방식으로 앵커를 고정한다.
 function createHeatmapElement(challenge) {
   var today = todayStr();
-  var dates = getRecentDates(getHeatmapDayCount(challenge), today);
+  var dates = getChallengeDates(challenge.startDate, getHeatmapDayCount(challenge));
 
   var grid = document.createElement("div");
   grid.className = "heatmap-grid";
 
-  dates.forEach(function (dateStr) {
+  dates.forEach(function (dateStr, index) {
     var cell = document.createElement("div");
     var achieved = challenge.history.indexOf(dateStr) !== -1;
     var classes = "heatmap-cell";
     if (achieved) classes += " achieved";
     if (dateStr === today) classes += " today";
+    // 원래 targetDays 칸을 넘어 실패 때문에 연장된 칸은 다른 색으로 표시한다.
+    if (index >= challenge.targetDays) classes += " bonus";
     cell.className = classes;
     cell.title = dateStr;
     if (achieved) {
@@ -1102,13 +1243,66 @@ function createHeatmapElement(challenge) {
   return grid;
 }
 
+// 완료된 챌린지들을 "🏆 지난 기록" 뱃지 리스트로 보여준다. 최신 완료가 위로 오도록 역순으로 나열한다.
+// 뱃지 아이콘은 히트맵 도장(createHeatmapStamp)을 그대로 재사용한다 — 그 챌린지 때 설정했던
+// 모양/색/문구가 완료 당시 그대로 남아 있어야 하므로, 아카이브 항목에 저장해 둔 값을 쓴다.
+function createArchiveListElement(archive) {
+  var wrapper = document.createElement("div");
+  wrapper.className = "archive-section";
+
+  var heading = document.createElement("p");
+  heading.className = "archive-heading";
+  heading.textContent = "🏆 지난 기록";
+  wrapper.appendChild(heading);
+
+  var list = document.createElement("ul");
+  list.className = "archive-list";
+
+  archive
+    .slice()
+    .reverse()
+    .forEach(function (entry) {
+      var item = document.createElement("li");
+      item.className = "archive-item";
+
+      var badge = document.createElement("div");
+      badge.className = "archive-badge";
+      badge.appendChild(createHeatmapStamp(entry.stampShape, entry.stampColor, entry.stampText));
+
+      var label = document.createElement("span");
+      label.className = "archive-label";
+      label.textContent =
+        formatKoreanDate(entry.startDate) +
+        " ~ " +
+        formatKoreanDate(entry.endDate) +
+        " · " +
+        entry.totalDays +
+        "일 만에 " +
+        entry.targetDays +
+        "일 달성";
+
+      item.appendChild(badge);
+      item.appendChild(label);
+      list.appendChild(item);
+    });
+
+  wrapper.appendChild(list);
+  return wrapper;
+}
+
 // 헤더 배지 + 챌린지 영역(연속일/목표 진행바, 최고 기록, 설정 폼, 목표 달성 축하, 히트맵)을 그린다 (FR-5.1, FR-5.3, FR-5.5, FR-5.6).
 function renderChallenge() {
   var challenge = loadChallenge();
   var badge = document.getElementById("streak-badge");
   badge.textContent = challenge.currentStreak > 0 ? "🔥 " + challenge.currentStreak + "일 연속" : "";
 
-  document.getElementById("habit-start-date").textContent = formatStartDateLabel(challenge.startDate);
+  var totalHeatmapDays = getHeatmapDayCount(challenge);
+  var bonusDays = totalHeatmapDays - challenge.targetDays;
+  document.getElementById("habit-start-date").textContent = formatChallengeDateRangeLabel(
+    challenge.startDate,
+    totalHeatmapDays,
+    bonusDays
+  );
   document.getElementById("daily-quote").textContent = getDailyQuote(todayStr());
 
   var container = document.getElementById("challenge-section");
@@ -1145,7 +1339,10 @@ function renderChallenge() {
 
   var heatmapHeading = document.createElement("p");
   heatmapHeading.className = "heatmap-heading";
-  heatmapHeading.textContent = "최근 " + getHeatmapDayCount(challenge) + "일";
+  heatmapHeading.textContent =
+    bonusDays > 0
+      ? "목표 " + challenge.targetDays + "일 연속 (놓친 날 때문에 " + bonusDays + "일 연장됨)"
+      : "목표 " + challenge.targetDays + "일 연속";
 
   var settingsBtn = document.createElement("button");
   settingsBtn.type = "button";
@@ -1157,6 +1354,12 @@ function renderChallenge() {
   container.appendChild(bestRecord);
   container.appendChild(heatmapHeading);
   container.appendChild(createHeatmapElement(challenge));
+
+  var archive = loadChallengeArchive();
+  if (archive.length > 0) {
+    container.appendChild(createArchiveListElement(archive));
+  }
+
   container.appendChild(settingsBtn);
 
   if (challengeSettingsOpen) {
@@ -1182,6 +1385,47 @@ function initChallengeEvents() {
   });
 }
 
+// 헤더의 시작일 라벨을 클릭하면 <input type="date">로 바꿔서 브라우저 기본 달력 UI로 시작일을 고를 수
+// 있게 한다. 부모와 상의해 정한 특정 날짜로 시작일을 미루고 싶을 수 있어서 프로필 생성일에 자동 고정하지
+// 않고 언제든 다시 바꿀 수 있게 열어 둔다 (FR-habit). 저장은 값이 바뀌었을 때만 한다.
+function initStartDateEditor() {
+  var label = document.getElementById("habit-start-date");
+  var input = document.getElementById("start-date-input");
+
+  function openEditor() {
+    input.value = loadChallenge().startDate;
+    label.hidden = true;
+    input.hidden = false;
+    input.focus();
+    if (typeof input.showPicker === "function") input.showPicker();
+  }
+
+  function closeEditor() {
+    input.hidden = true;
+    label.hidden = false;
+  }
+
+  label.addEventListener("click", openEditor);
+  label.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      openEditor();
+    }
+  });
+
+  input.addEventListener("change", function () {
+    if (input.value) {
+      var challenge = loadChallenge();
+      challenge.startDate = input.value;
+      saveChallenge(challenge);
+    }
+    closeEditor();
+    renderAll();
+  });
+
+  input.addEventListener("blur", closeEditor);
+}
+
 // 페이지 맨 아래로 옮긴 저장/취소 버튼은 고정된 요소이므로 최초 1회만 리스너를 붙인다.
 function initSettingsActions() {
   document.getElementById("challenge-settings-save-btn").addEventListener("click", saveChallengeSettingsFromInputs);
@@ -1191,6 +1435,7 @@ function initSettingsActions() {
 // 진행률(FR-4)/목록(FR-1/2/3)/챌린지(FR-5)를 함께 갱신한다. 실제로 할 일·챌린지 데이터가 바뀐 경우에만 호출한다.
 function renderAll() {
   markAchievedIfNeeded();
+  archiveCompletedChallengeIfNeeded();
   renderProgress();
   renderTodos();
   renderChallenge();
@@ -1236,6 +1481,7 @@ function exportData() {
     exportedAt: new Date().toISOString(),
     todos: loadTodos(),
     challenge: loadChallenge(),
+    challengeArchive: loadChallengeArchive(),
   };
 
   var blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
@@ -1268,6 +1514,9 @@ function applyImportedData(payload) {
   // 백업 시점의 challenge에 없는 필드(예: 이전 버전에서 내보낸 startDate 누락)는 기본값으로 채운다.
   var mergedChallenge = Object.assign({}, getDefaultChallenge(), payload.challenge);
   saveChallenge(mergedChallenge);
+
+  // challengeArchive가 없던(이전 버전) 백업 파일도 그대로 가져올 수 있도록 배열이 아니면 빈 배열로 채운다.
+  saveChallengeArchive(Array.isArray(payload.challengeArchive) ? payload.challengeArchive : []);
 
   // 가져온 lastAchievedDate가 이 기기의 오늘 기준으로 이미 2일 이상 지났다면 currentStreak를 초기화한다.
   checkStreakOnLoad();
@@ -2143,6 +2392,7 @@ function initMainApp() {
   initFilterTabs();
   renderFilterTabs();
   initChallengeEvents();
+  initStartDateEditor();
   initSettingsActions();
   initCategoryManagement();
   renderCategoryChips();
