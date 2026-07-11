@@ -81,6 +81,7 @@ function getDefaultChallenge() {
     stampShape: "circle",
     stampColor: "#ec4899",
     stampText: "참 잘했어요!",
+    stampLog: {},
     hasArchivedCurrentGoal: false,
   };
 }
@@ -134,6 +135,10 @@ function loadChallenge() {
     }
     if (!parsed.stampText) {
       parsed.stampText = "참 잘했어요!";
+      needsBackfill = true;
+    }
+    if (!parsed.stampLog || typeof parsed.stampLog !== "object") {
+      parsed.stampLog = {};
       needsBackfill = true;
     }
     if (typeof parsed.hasArchivedCurrentGoal !== "boolean") {
@@ -590,13 +595,30 @@ function trimHistory(history) {
   return history.slice(history.length - HISTORY_MAX_DAYS);
 }
 
+// stampLog는 history에 남아 있는 날짜만 들고 있으면 된다 — trimHistory로 잘려 나간 날짜의 도장
+// 스냅샷은 같이 버려서 stampLog가 무한정 쌓이지 않게 한다.
+function pruneStampLog(stampLog, history) {
+  var pruned = {};
+  history.forEach(function (dateStr) {
+    if (stampLog[dateStr]) pruned[dateStr] = stampLog[dateStr];
+  });
+  return pruned;
+}
+
 // markAchievedIfNeeded()의 순수 로직.
 // - 미달성 → 달성: currentStreak +1, lastAchievedDate/history 갱신, bestStreak 갱신.
 // - 달성(오늘 기록됨) → 미달성: 체크 해제 등으로 조건을 다시 잃은 경우의 롤백.
 //   currentStreak -1, history에서 오늘 제거, lastAchievedDate를 history의 마지막 날짜로 되돌림.
 // - 그 외(상태 변화 없음): 아무 것도 하지 않는다.
+// 달성 순간의 stampShape/stampColor/stampText를 그 날짜에 스냅샷으로 남긴다(stampLog) — 나중에 설정에서
+// 도장 모양/색을 바꿔도 이미 찍힌 날짜는 그때 모습 그대로 남고, 그 이후 새로 달성하는 날부터만 바뀐 모양이
+// 적용된다. saveChallengeSettingsFromInputs()는 challenge.stampShape/stampColor/stampText만 갱신할 뿐
+// stampLog는 건드리지 않으므로 과거 도장이 소급 변경되지 않는다.
 function computeMarkAchieved(todos, challenge, today) {
-  var next = Object.assign({}, challenge, { history: challenge.history.slice() });
+  var next = Object.assign({}, challenge, {
+    history: challenge.history.slice(),
+    stampLog: Object.assign({}, challenge.stampLog),
+  });
   var achievedToday = computeAchieved(todos, next);
   var alreadyMarkedToday = next.lastAchievedDate === today;
 
@@ -607,12 +629,15 @@ function computeMarkAchieved(todos, challenge, today) {
       next.history.push(today);
       next.history.sort();
     }
+    next.stampLog[today] = { shape: next.stampShape, color: next.stampColor, text: next.stampText };
     next.history = trimHistory(next.history);
+    next.stampLog = pruneStampLog(next.stampLog, next.history);
     next.bestStreak = Math.max(next.bestStreak, next.currentStreak);
   } else if (!achievedToday && alreadyMarkedToday) {
     next.currentStreak = Math.max(0, next.currentStreak - 1);
     var idx = next.history.indexOf(today);
     if (idx !== -1) next.history.splice(idx, 1);
+    delete next.stampLog[today];
     next.lastAchievedDate = next.history.length > 0 ? next.history[next.history.length - 1] : null;
   }
 
@@ -713,6 +738,29 @@ function runStreakSelfTests() {
   assert("체크 해제 시 currentStreak가 -1 롤백된다", afterRollback.currentStreak === 2);
   assert("체크 해제 시 history에서 오늘이 제거된다", afterRollback.history.indexOf("2024-01-04") === -1);
   assert("체크 해제 후에도 bestStreak는 감소하지 않는다", afterRollback.bestStreak === 3);
+  assert("체크 해제 시 stampLog에서도 오늘이 제거된다", !afterRollback.stampLog["2024-01-04"]);
+
+  // 시나리오: 달성 당시의 도장 모양/색이 그 날짜의 stampLog에 스냅샷으로 남고, 그 뒤 설정에서 도장을
+  // 바꿔도 이미 찍힌 날짜의 스냅샷은 바뀌지 않아야 한다(과거 도장은 소급 변경되지 않는다).
+  assert(
+    "달성 시 stampLog에 그 날짜의 도장 스냅샷이 저장된다",
+    afterAchieve.stampLog["2024-01-04"] &&
+      afterAchieve.stampLog["2024-01-04"].shape === "circle" &&
+      afterAchieve.stampLog["2024-01-04"].color === "#ec4899"
+  );
+  var challengeD = Object.assign({}, afterAchieve, { stampShape: "star", stampColor: "#000000" });
+  var todosStillAchieved = [
+    { id: "1", text: "t", category: "work", done: true, completedAt: "2024-01-05T00:00:00.000Z", createdAt: "2024-01-04" },
+  ];
+  var afterStampChange = computeMarkAchieved(todosStillAchieved, challengeD, "2024-01-05");
+  assert(
+    "도장 설정을 바꾼 후에도 이전에 찍힌 날짜의 스냅샷은 그대로 유지된다",
+    afterStampChange.stampLog["2024-01-04"].shape === "circle" && afterStampChange.stampLog["2024-01-04"].color === "#ec4899"
+  );
+  assert(
+    "도장 설정을 바꾼 뒤 새로 찍는 날짜는 바뀐 모양으로 스냅샷이 저장된다",
+    afterStampChange.stampLog["2024-01-05"].shape === "star" && afterStampChange.stampLog["2024-01-05"].color === "#000000"
+  );
 
   // 시나리오: 습관 목표는 삭제되지 않고, 어제 이전에 체크된 완료 상태만 매일 초기화된다.
   var todosFromYesterday = [
@@ -1183,6 +1231,7 @@ function saveChallengeSettingsFromInputs() {
   if (wasGoalReached) {
     challenge.startDate = todayStr();
     challenge.history = [];
+    challenge.stampLog = {};
     challenge.currentStreak = 0;
     challenge.lastAchievedDate = null;
     challenge.hasArchivedCurrentGoal = false;
@@ -1235,7 +1284,15 @@ function createHeatmapElement(challenge) {
     cell.className = classes;
     cell.title = dateStr;
     if (achieved) {
-      cell.appendChild(createHeatmapStamp(challenge.stampShape, challenge.stampColor, challenge.stampText));
+      // stampLog에 그 날짜의 스냅샷이 있으면(달성 당시 도장 모양/색) 그걸 쓰고, 이 기능이 생기기 전에
+      // 찍힌 옛 날짜라 스냅샷이 없으면 현재 설정값으로 대체한다 — 그래야 설정에서 도장을 바꿔도 이미
+      // 찍힌 도장은 그대로 유지되고, 새로 찍는 도장부터만 바뀐다.
+      var stampInfo = challenge.stampLog[dateStr] || {
+        shape: challenge.stampShape,
+        color: challenge.stampColor,
+        text: challenge.stampText,
+      };
+      cell.appendChild(createHeatmapStamp(stampInfo.shape, stampInfo.color, stampInfo.text));
     }
     grid.appendChild(cell);
   });
