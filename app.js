@@ -35,6 +35,7 @@ var STORAGE_KEYS = {
   LAST_CATEGORY: "todoapp.lastCategory",
   CATEGORIES: "todoapp.categories",
   CHALLENGE_ARCHIVE: "todoapp.challengeArchive",
+  WEATHER_LOCATION: "todoapp.weatherLocation",
 };
 
 // 프로필 개념 도입 전(단일 사용자 시절)에 저장된 데이터를 위한 특수 프로필 id.
@@ -1422,6 +1423,7 @@ function renderChallenge() {
   // 자주 안 쓰는 메뉴(할 일 입력/카테고리 관리/데이터 백업/저장·취소)는 "⚙ 설정"을 열 때만 함께 노출한다.
   document.getElementById("input-section").hidden = !challengeSettingsOpen;
   document.getElementById("category-section").hidden = !challengeSettingsOpen;
+  document.getElementById("weather-location-section").hidden = !challengeSettingsOpen;
   document.getElementById("backup-section").hidden = !challengeSettingsOpen;
   document.getElementById("settings-actions-section").hidden = !challengeSettingsOpen;
 }
@@ -2332,6 +2334,8 @@ function initBgmPlayer() {
  * 날짜/시간은 로컬 시계로 표시하고, 날씨는 위치 권한이 있고 인터넷이 연결돼 있을 때만
  * Open-Meteo(무료, API 키 불필요, CORS 허용)로 조회한다. 실패해도 조용히 비워둔다 —
  * 이 앱은 오프라인(file://)에서도 동작해야 하므로 날씨는 있으면 좋은 부가 정보일 뿐이다.
+ * 설정에서 지역을 직접 지정(weatherLocation, Open-Meteo Geocoding API로 검색)해두면 기기 GPS
+ * 대신 그 좌표를 쓴다 — 데스크탑처럼 위치 정확도가 낮은 환경이나, 다른 지역 날씨를 보고 싶을 때 용도.
  */
 
 var WEEKDAY_LABELS_KO = ["일", "월", "화", "수", "목", "금", "토"];
@@ -2380,47 +2384,107 @@ function describeWeatherCode(code) {
   return WEATHER_CODE_LABELS[code] || "🌡️";
 }
 
+// 설정에서 수동으로 지정한 날씨 지역. { name, admin1, latitude, longitude } 또는 미지정 시 null(자동/GPS).
+function loadWeatherLocation() {
+  try {
+    var raw = localStorage.getItem(scopedKey(STORAGE_KEYS.WEATHER_LOCATION));
+    return raw ? JSON.parse(raw) : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveWeatherLocation(location) {
+  try {
+    if (location) {
+      localStorage.setItem(scopedKey(STORAGE_KEYS.WEATHER_LOCATION), JSON.stringify(location));
+    } else {
+      localStorage.removeItem(scopedKey(STORAGE_KEYS.WEATHER_LOCATION));
+    }
+    return true;
+  } catch (e) {
+    notifyStorageError("저장에 실패했습니다. 브라우저 저장 공간을 확인해 주세요.");
+    return false;
+  }
+}
+
+// Open-Meteo Geocoding API(무료, API 키 불필요)로 지역 이름을 검색해 후보 목록을 콜백에 넘긴다.
+// 실패(네트워크 오류 등)면 null, 검색 결과가 없으면 빈 배열을 넘겨 둘을 구분한다.
+function searchWeatherLocationCandidates(name, callback) {
+  var trimmed = (name || "").trim();
+  if (!trimmed) {
+    callback([]);
+    return;
+  }
+
+  var url =
+    "https://geocoding-api.open-meteo.com/v1/search?name=" +
+    encodeURIComponent(trimmed) +
+    "&count=5&language=ko&format=json";
+
+  fetch(url)
+    .then(function (res) {
+      return res.json();
+    })
+    .then(function (data) {
+      callback((data && data.results) || []);
+    })
+    .catch(function () {
+      callback(null);
+    });
+}
+
 // 위치 권한 요청은 여기서만 발생한다 — 사용자가 버튼을 눌렀을 때만 호출되고,
 // 페이지를 열거나 새로고침할 때 자동으로는 절대 호출하지 않는다 (file://에서는 권한 허용이
 // 안정적으로 기억되지 않아 매번 새로고침될 때마다 프롬프트가 뜨는 문제가 있었다).
+// 단, 설정에서 지정해 둔 weatherLocation이 있으면 GPS 자체를 건드리지 않고 그 좌표로 바로 조회한다.
 var weatherAutoRefreshTimer = null;
+
+function fetchWeatherForCoords(latitude, longitude) {
+  var weatherBtn = document.getElementById("weather-text");
+  var url =
+    "https://api.open-meteo.com/v1/forecast?latitude=" + latitude + "&longitude=" + longitude + "&current_weather=true";
+
+  fetch(url)
+    .then(function (res) {
+      return res.json();
+    })
+    .then(function (data) {
+      if (!data || !data.current_weather) {
+        weatherBtn.textContent = "🌤️ 날씨 보기";
+        return;
+      }
+      var cw = data.current_weather;
+      weatherBtn.textContent = describeWeatherCode(cw.weathercode) + " " + Math.round(cw.temperature) + "°C";
+
+      // 이번 페이지가 열려 있는 동안에는 15분마다 조용히 갱신한다.
+      if (!weatherAutoRefreshTimer) {
+        weatherAutoRefreshTimer = setInterval(fetchWeather, 15 * 60 * 1000);
+      }
+    })
+    .catch(function () {
+      // 네트워크 오류(오프라인 등) 시 다시 눌러볼 수 있게 원래 문구로 되돌린다.
+      weatherBtn.textContent = "🌤️ 날씨 보기";
+    });
+}
 
 function fetchWeather() {
   var weatherBtn = document.getElementById("weather-text");
+  var savedLocation = loadWeatherLocation();
+
+  if (savedLocation) {
+    weatherBtn.textContent = "…";
+    fetchWeatherForCoords(savedLocation.latitude, savedLocation.longitude);
+    return;
+  }
+
   if (!navigator.geolocation) return;
 
   weatherBtn.textContent = "…";
 
   navigator.geolocation.getCurrentPosition(
     function (pos) {
-      var url =
-        "https://api.open-meteo.com/v1/forecast?latitude=" +
-        pos.coords.latitude +
-        "&longitude=" +
-        pos.coords.longitude +
-        "&current_weather=true";
-
-      fetch(url)
-        .then(function (res) {
-          return res.json();
-        })
-        .then(function (data) {
-          if (!data || !data.current_weather) {
-            weatherBtn.textContent = "🌤️ 날씨 보기";
-            return;
-          }
-          var cw = data.current_weather;
-          weatherBtn.textContent = describeWeatherCode(cw.weathercode) + " " + Math.round(cw.temperature) + "°C";
-
-          // 권한을 이미 받은 뒤이므로, 이번 페이지가 열려 있는 동안에는 15분마다 조용히 갱신한다.
-          if (!weatherAutoRefreshTimer) {
-            weatherAutoRefreshTimer = setInterval(fetchWeather, 15 * 60 * 1000);
-          }
-        })
-        .catch(function () {
-          // 네트워크 오류(오프라인 등) 시 다시 눌러볼 수 있게 원래 문구로 되돌린다.
-          weatherBtn.textContent = "🌤️ 날씨 보기";
-        });
+      fetchWeatherForCoords(pos.coords.latitude, pos.coords.longitude);
     },
     function () {
       // 위치 권한 거부/실패 시에도 다시 눌러볼 수 있게 원래 문구로 되돌린다.
@@ -2437,6 +2501,87 @@ function initDateTimeWeather() {
   var weatherBtn = document.getElementById("weather-text");
   weatherBtn.textContent = "🌤️ 날씨 보기";
   weatherBtn.addEventListener("click", fetchWeather);
+}
+
+// 지역 후보를 사람이 읽기 좋은 문구로 만든다: "충청북도 청주시" 처럼 admin1/admin2를 붙이고,
+// 이름 자체가 이미 admin2와 같으면(도시명 검색 시 흔함) 중복 표기하지 않는다.
+function formatWeatherLocationLabel(candidate) {
+  var parts = [];
+  if (candidate.admin1) parts.push(candidate.admin1);
+  if (candidate.admin2 && candidate.admin2 !== candidate.name) parts.push(candidate.admin2);
+  parts.push(candidate.name);
+  return parts.join(" ");
+}
+
+function renderWeatherLocationStatus() {
+  var statusEl = document.getElementById("weather-location-current");
+  var resetBtn = document.getElementById("weather-location-reset-btn");
+  var saved = loadWeatherLocation();
+
+  if (saved) {
+    statusEl.textContent = "현재 지역: " + formatWeatherLocationLabel(saved);
+    resetBtn.hidden = false;
+  } else {
+    statusEl.textContent = "현재 지역: 자동(내 위치)";
+    resetBtn.hidden = true;
+  }
+}
+
+function initWeatherLocationSettings() {
+  var form = document.getElementById("weather-location-form");
+  var input = document.getElementById("weather-location-input");
+  var resultsEl = document.getElementById("weather-location-results");
+  var resetBtn = document.getElementById("weather-location-reset-btn");
+
+  renderWeatherLocationStatus();
+
+  form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    var query = input.value;
+    resultsEl.innerHTML = "";
+    resultsEl.hidden = true;
+
+    searchWeatherLocationCandidates(query, function (candidates) {
+      if (candidates === null) {
+        showToast("지역을 검색하지 못했습니다. 인터넷 연결을 확인해 주세요.", "error");
+        return;
+      }
+      if (candidates.length === 0) {
+        showToast("일치하는 지역을 찾지 못했습니다. 다른 이름으로 검색해 보세요(예: 청주시).", "error");
+        return;
+      }
+
+      candidates.forEach(function (candidate) {
+        var btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "weather-location-result";
+        btn.textContent = formatWeatherLocationLabel(candidate);
+        btn.addEventListener("click", function () {
+          saveWeatherLocation({
+            name: candidate.name,
+            admin1: candidate.admin1 || "",
+            admin2: candidate.admin2 || "",
+            latitude: candidate.latitude,
+            longitude: candidate.longitude,
+          });
+          resultsEl.innerHTML = "";
+          resultsEl.hidden = true;
+          input.value = "";
+          renderWeatherLocationStatus();
+          fetchWeather(); // 이미 좌표를 알고 있으므로 GPS 권한 없이 바로 갱신된다.
+          showToast("날씨 지역이 저장되었습니다.", "success");
+        });
+        resultsEl.appendChild(btn);
+      });
+      resultsEl.hidden = false;
+    });
+  });
+
+  resetBtn.addEventListener("click", function () {
+    saveWeatherLocation(null);
+    renderWeatherLocationStatus();
+    fetchWeather();
+  });
 }
 
 /* ===== 초기화 ===== */
@@ -2459,6 +2604,7 @@ function initMainApp() {
   initBackupControls();
   initBgmPlayer();
   initDateTimeWeather();
+  initWeatherLocationSettings();
 
   document.getElementById("switch-profile-btn").addEventListener("click", function () {
     location.reload(); // currentProfileId는 메모리에만 있으므로 새로고침하면 프로필 선택 화면으로 돌아간다.

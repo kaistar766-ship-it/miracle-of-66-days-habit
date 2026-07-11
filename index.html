@@ -82,6 +82,17 @@
     <section id="challenge-section" class="challenge-section app-section" aria-label="연속 달성 챌린지">
     </section>
 
+    <section id="weather-location-section" class="weather-location-section app-section" aria-label="날씨 지역 설정" hidden>
+      <p class="weather-location-heading">날씨 지역 설정</p>
+      <p id="weather-location-current" class="weather-location-current"></p>
+      <form id="weather-location-form" class="weather-location-form">
+        <input type="text" id="weather-location-input" placeholder="지역 이름 (예: 청주시)" autocomplete="off" />
+        <button type="submit">검색</button>
+      </form>
+      <div id="weather-location-results" class="weather-location-results" hidden></div>
+      <button type="button" id="weather-location-reset-btn" class="weather-location-reset-btn" hidden>자동(내 위치)으로 초기화</button>
+    </section>
+
     <section id="backup-section" class="backup-section app-section" aria-label="데이터 백업" hidden>
       <p class="backup-heading">데이터 백업</p>
       <p class="backup-description">할 일과 챌린지 기록을 파일로 저장하거나, 다른 기기에서 저장한 파일을 불러올 수 있습니다.</p>
