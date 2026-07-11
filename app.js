@@ -1200,17 +1200,17 @@ function cancelChallengeSettings() {
   renderAll();
 }
 
-// 히트맵에 표시할 총 일수. 목표는 "targetDays일 연속 성공"이므로, 이미 지나간 날 중 실패한(달성 못한)
-// 날은 연속 기록에서 빠지고 그만큼 뒤에 칸이 더 필요해진다 — 그 실패가 확정되는 즉시(며칠이 더 지나길
-// 기다리지 않고) 칸을 늘려서 목표가 멀어졌다는 걸 바로 시각적으로 보여준다. 단, 오늘은 아직 하루가
-// 끝나지 않았으니 아직 체크 전이라도 실패로 세지 않는다 — 완전히 지나간 날만 실패 여부를 판정한다.
+// 히트맵에 표시할 총 일수. 목표는 "targetDays일 연속 성공"이므로, 하루라도 놓치면 그때까지 쌓은 연속
+// 기록은 전부 날아가고(currentStreak가 0으로 리셋됨 — computeStreakReset 참고) 다음날부터 targetDays일을
+// 처음부터 다시 채워야 한다. 그래서 놓친 날 1개당 칸 1개가 느는 게 아니라, 그 시점까지 잃어버린 스트릭
+// 크기만큼 칸이 통째로 더 필요해진다 — 예를 들어 66일 목표에서 연속 64일 성공 후 65일째에 실패하면
+// currentStreak가 0으로 리셋되므로 66일을 처음부터 다시 채워야 하고, 총 칸 수는 "지금까지 지난 날 수
+// (65) + 새로 필요한 66일" = 131칸이 된다(원래 66칸보다 65칸 더 늘어남). 단, 오늘은 아직 하루가 끝나지
+// 않았으니 최소 오늘 몫 1칸은 항상 확보한다(체크 전이라도 실패로 세지 않기 위함).
 function getHeatmapDayCount(challenge) {
   var elapsedDaysBeforeToday = dayDiff(challenge.startDate, todayStr());
-  var missedDays = 0;
-  for (var i = 0; i < elapsedDaysBeforeToday; i++) {
-    if (challenge.history.indexOf(addDays(challenge.startDate, i)) === -1) missedDays++;
-  }
-  return challenge.targetDays + missedDays;
+  var daysStillNeeded = Math.max(1, challenge.targetDays - challenge.currentStreak);
+  return elapsedDaysBeforeToday + daysStillNeeded;
 }
 
 // 목표일 수(targetDays)에 맞춘 달성 히트맵을 순수 CSS grid로 그린다 (FR-5.5).
