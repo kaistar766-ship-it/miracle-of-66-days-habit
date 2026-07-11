@@ -223,13 +223,6 @@ var PALETTE_COLORS = [
   "#64748b",
 ];
 
-// 삭제할 수 없는 기본 제공 카테고리인지 여부.
-function isBuiltInCategory(id) {
-  return BUILT_IN_CATEGORIES.some(function (c) {
-    return c.id === id;
-  });
-}
-
 function pickNextPaletteColor(existingCount) {
   return PALETTE_COLORS[existingCount % PALETTE_COLORS.length];
 }
@@ -285,11 +278,13 @@ function addCategory(label, color) {
   return newCategory;
 }
 
-// 기본 제공 카테고리는 삭제할 수 없다. 삭제된 카테고리를 쓰던 할 일은 기본값("work")으로 재배정한다.
+// 기본 제공 카테고리(업무/개인/공부)도 포함해 모든 카테고리를 삭제할 수 있다. 다만 할 일이 갈 곳을
+// 잃지 않도록 최소 1개는 항상 남아 있어야 한다. 삭제된 카테고리를 쓰던 할 일은 남은 카테고리 중
+// 첫 번째로 재배정한다(더 이상 "work"에 고정되지 않음 — work 자체가 삭제될 수 있기 때문).
 function deleteCategory(id) {
-  if (isBuiltInCategory(id)) return false;
-
   var categories = loadCategories();
+  if (categories.length <= 1) return false;
+
   var remaining = categories.filter(function (c) {
     return c.id !== id;
   });
@@ -297,17 +292,18 @@ function deleteCategory(id) {
 
   saveCategories(remaining);
 
+  var fallbackId = remaining[0].id;
   var todos = loadTodos();
   var changed = false;
   todos.forEach(function (t) {
     if (t.category === id) {
-      t.category = "work";
+      t.category = fallbackId;
       changed = true;
     }
   });
   if (changed) saveTodos(todos);
 
-  if (loadLastCategory() === id) saveLastCategory("work");
+  if (loadLastCategory() === id) saveLastCategory(fallbackId);
 
   return true;
 }
@@ -1779,14 +1775,12 @@ function renderCategoryChips() {
     label.textContent = c.label;
     chip.appendChild(label);
 
-    if (!isBuiltInCategory(c.id)) {
-      var removeBtn = document.createElement("button");
-      removeBtn.type = "button";
-      removeBtn.className = "category-chip-remove";
-      removeBtn.textContent = "×";
-      removeBtn.setAttribute("aria-label", c.label + " 삭제");
-      chip.appendChild(removeBtn);
-    }
+    var removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "category-chip-remove";
+    removeBtn.textContent = "×";
+    removeBtn.setAttribute("aria-label", c.label + " 삭제");
+    chip.appendChild(removeBtn);
 
     container.appendChild(chip);
   });
@@ -1824,13 +1818,22 @@ function initCategoryManagement() {
     if (!e.target.classList.contains("category-chip-remove")) return;
     var chip = e.target.closest(".category-chip");
     var id = chip.dataset.id;
-    var category = loadCategories().find(function (c) {
+    var categories = loadCategories();
+    var category = categories.find(function (c) {
       return c.id === id;
     });
     if (!category) return;
 
+    if (categories.length <= 1) {
+      showToast("카테고리는 최소 1개 이상 남아 있어야 합니다.", "error");
+      return;
+    }
+
+    var fallback = categories.find(function (c) {
+      return c.id !== id;
+    });
     var confirmed = window.confirm(
-      "'" + category.label + "' 카테고리를 삭제할까요? 이 카테고리로 등록된 할 일은 '업무'로 이동합니다."
+      "'" + category.label + "' 카테고리를 삭제할까요? 이 카테고리로 등록된 할 일은 '" + fallback.label + "'(으)로 이동합니다."
     );
     if (!confirmed) return;
 
