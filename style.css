@@ -727,6 +727,22 @@ input[type="checkbox"] {
 .heatmap-cell.bonus.achieved {
   background: var(--danger-soft);
 }
+.heatmap-cell.makeup-available {
+  cursor: pointer;
+  outline: 2px dashed var(--accent);
+  outline-offset: 2px;
+}
+.heatmap-cell.makeup-available::after {
+  content: "+";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 1.1rem;
+}
 .heatmap-cell:hover {
   transform: scale(1.15);
   z-index: 1;
