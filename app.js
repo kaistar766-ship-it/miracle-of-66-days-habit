@@ -1556,11 +1556,26 @@ function renderChallenge() {
 }
 
 // 챌린지 영역에 이벤트를 위임해 붙인다 (렌더링마다 재등록되지 않도록 최초 1회만 호출).
+// 어제 소급 체크는 남용(실수로/충동적으로 누르는 것) 방지를 위해 관리자 비밀번호를 한 번 더 요구한다.
+// 주의: 이 앱은 순수 클라이언트 정적 파일(app.js가 그대로 브라우저에 노출됨)이라 이 비밀번호는 실제
+// 보안이 아니다 — 제3자의 접근을 막는 용도가 아니라, 스스로 남용하지 않도록 두는 허들일 뿐이다.
+var YESTERDAY_MAKEUP_ADMIN_PASSWORD = "lovezia315";
+
 function initChallengeEvents() {
   var container = document.getElementById("challenge-section");
 
   function tryMarkYesterday(cell) {
     if (!cell || !cell.classList.contains("makeup-available")) return;
+
+    var password = window.prompt(
+      "어제(" + cell.dataset.date + ") 소급 체크는 관리자 비밀번호가 필요합니다. 비밀번호를 입력하세요:"
+    );
+    if (password === null) return; // 취소
+    if (password !== YESTERDAY_MAKEUP_ADMIN_PASSWORD) {
+      showToast("비밀번호가 올바르지 않습니다.", "error");
+      return;
+    }
+
     var confirmed = window.confirm(
       "어제(" + cell.dataset.date + ") 목표를 모두 달성하셨나요? 지금 체크하면 어제 칸에 도장이 찍히고 연속 기록도 이어집니다."
     );
