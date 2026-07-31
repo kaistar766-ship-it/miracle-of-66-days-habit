@@ -668,32 +668,37 @@ function countConsecutiveStreakEndingAt(history, dateStr) {
   return count;
 }
 
-// "어제" 하루만 소급으로 달성 처리한다 — 목표는 다 했는데 체크를 깜빡한 경우를 구제하는 예외 경로.
+// 과거의 특정 날짜(dateStr) 하루를 소급으로 달성 처리한다 — 목표는 다 했는데 체크를 깜빡한 경우를
+// 구제하는 예외 경로. 하루가 아니라 며칠이 지났어도(부모님이 비밀번호로 확인해 주면) 그 날짜를 콕 집어
+// 달성으로 인정할 수 있다 — "어제까지만" 이라는 제한은 없다.
 // 개별 할 일의 그날 체크 상태는 resetDailyCompletionOnLoad()가 이미 초기화해 버려 재현할 수 없으므로,
-// todos를 다시 검사하지 않고 사용자의 확인(클릭 전 confirm)을 그대로 신뢰해 history에 어제를 채워 넣는다.
-// 오늘 이전 날짜는 어제까지만 허용한다 — 그 이전 날짜는 UI(createHeatmapElement)에서 애초에 클릭 가능한
-// 형태로 노출하지 않는다. 이미 도장이 찍힌 날이거나 챌린지 시작일 이전이면 아무 것도 하지 않는다.
+// todos를 다시 검사하지 않고 사용자의 확인(클릭 전 confirm)을 그대로 신뢰해 history에 그 날짜를 채워
+// 넣는다. dateStr은 오늘보다 반드시 이전이어야 한다(오늘/미래는 UI에서 애초에 클릭 가능한 형태로
+// 노출하지 않지만, 방어적으로 여기서도 막는다). 이미 도장이 찍힌 날이거나 챌린지 시작일 이전이면
+// 아무 것도 하지 않는다.
 // "하루라도 놓치면 스트릭이 끊긴다"는 원래 규칙과 달리, 이 경로로 채워 넣을 때는 제때 체크했던 것처럼
 // currentStreak을 history 기준으로 다시 계산해 복구한다 — checkStreakOnLoad가 이미 0으로 리셋해 뒀어도
-// 여기서 덮어쓴다.
-function computeMarkYesterdayAchieved(challenge, today) {
-  var yesterday = addDays(today, -1);
-  if (challenge.history.indexOf(yesterday) !== -1) return challenge; // 이미 달성됨
-  if (dayDiff(challenge.startDate, yesterday) < 0) return challenge; // 챌린지 시작 전 날짜
+// 여기서 덮어쓴다. 단, dateStr과 오늘 사이에 여전히 미체크로 남아 있는 다른 날짜들은 이 호출만으로는
+// 채워지지 않으므로(콕 집은 그 날짜만 구제됨), 그 경우 currentStreak은 dateStr로 끝나는 연속 기록
+// 길이로 복구된다.
+function computeMarkDateAchieved(challenge, dateStr, today) {
+  if (dayDiff(dateStr, today) <= 0) return challenge; // 오늘이거나 미래 날짜는 대상이 아님
+  if (challenge.history.indexOf(dateStr) !== -1) return challenge; // 이미 달성됨
+  if (dayDiff(challenge.startDate, dateStr) < 0) return challenge; // 챌린지 시작 전 날짜
 
   var next = Object.assign({}, challenge, {
     history: challenge.history.slice(),
     stampLog: Object.assign({}, challenge.stampLog),
   });
 
-  next.history.push(yesterday);
+  next.history.push(dateStr);
   next.history.sort();
-  next.stampLog[yesterday] = { shape: next.stampShape, color: next.stampColor, text: next.stampText };
+  next.stampLog[dateStr] = { shape: next.stampShape, color: next.stampColor, text: next.stampText };
   next.history = trimHistory(next.history);
   next.stampLog = pruneStampLog(next.stampLog, next.history);
 
-  // 이 시점의 history에서 가장 최근 날짜(오늘이 이미 달성돼 있었다면 오늘, 아니면 어제)를 기준으로
-  // 그 날로 끝나는 연속 기록 길이를 다시 세어 currentStreak/lastAchievedDate를 복구한다.
+  // 이 시점의 history에서 가장 최근 날짜(오늘이 이미 달성돼 있었다면 오늘, 아니면 방금 채운 날짜)를
+  // 기준으로 그 날로 끝나는 연속 기록 길이를 다시 세어 currentStreak/lastAchievedDate를 복구한다.
   var mostRecentAchieved = next.history[next.history.length - 1];
   next.currentStreak = countConsecutiveStreakEndingAt(next.history, mostRecentAchieved);
   next.bestStreak = Math.max(next.bestStreak, next.currentStreak);
@@ -702,9 +707,9 @@ function computeMarkYesterdayAchieved(challenge, today) {
   return next;
 }
 
-function markYesterdayAchieved() {
+function markDateAchieved(dateStr) {
   var challenge = loadChallenge();
-  var updated = computeMarkYesterdayAchieved(challenge, todayStr());
+  var updated = computeMarkDateAchieved(challenge, dateStr, todayStr());
   saveChallenge(updated);
   return updated;
 }
@@ -826,7 +831,7 @@ function runStreakSelfTests() {
     bestStreak: 2,
     lastAchievedDate: "2024-01-02",
   });
-  var afterYesterdayMakeup = computeMarkYesterdayAchieved(challengeE, "2024-01-04");
+  var afterYesterdayMakeup = computeMarkDateAchieved(challengeE, "2024-01-03", "2024-01-04");
   assert("어제 소급 체크 시 history에 어제가 추가된다", afterYesterdayMakeup.history.indexOf("2024-01-03") !== -1);
   assert("어제 소급 체크 시 이전 연속 기록까지 이어져 currentStreak가 복구된다", afterYesterdayMakeup.currentStreak === 3);
   assert("어제 소급 체크 시 bestStreak도 갱신된다", afterYesterdayMakeup.bestStreak === 3);
@@ -837,7 +842,7 @@ function runStreakSelfTests() {
   );
 
   // 시나리오: 이미 어제가 도장 찍힌 상태에서 다시 시도하면 아무 것도 바뀌지 않는다(중복 방지).
-  var afterYesterdayMakeupAgain = computeMarkYesterdayAchieved(afterYesterdayMakeup, "2024-01-04");
+  var afterYesterdayMakeupAgain = computeMarkDateAchieved(afterYesterdayMakeup, "2024-01-03", "2024-01-04");
   assert("이미 찍힌 어제 도장은 다시 눌러도 그대로다", afterYesterdayMakeupAgain.currentStreak === 3);
   assert(
     "이미 찍힌 어제 도장은 다시 눌러도 history 길이가 그대로다",
@@ -852,7 +857,7 @@ function runStreakSelfTests() {
     bestStreak: 0,
     lastAchievedDate: null,
   });
-  var afterYesterdayMakeupTooEarly = computeMarkYesterdayAchieved(challengeF, "2024-01-04");
+  var afterYesterdayMakeupTooEarly = computeMarkDateAchieved(challengeF, "2024-01-03", "2024-01-04");
   assert(
     "챌린지 시작일 이전 날짜는 소급 체크되지 않는다",
     afterYesterdayMakeupTooEarly.history.indexOf("2024-01-03") === -1
@@ -867,7 +872,7 @@ function runStreakSelfTests() {
     bestStreak: 1,
     lastAchievedDate: "2024-01-04",
   });
-  var afterYesterdayMakeupWithTodayDone = computeMarkYesterdayAchieved(challengeG, "2024-01-04");
+  var afterYesterdayMakeupWithTodayDone = computeMarkDateAchieved(challengeG, "2024-01-03", "2024-01-04");
   assert(
     "오늘 체크 후 어제를 소급 체크하면 연속 기록이 합쳐진다",
     afterYesterdayMakeupWithTodayDone.currentStreak === 2
@@ -876,6 +881,31 @@ function runStreakSelfTests() {
     "오늘 체크 후 어제를 소급 체크해도 lastAchievedDate는 오늘 그대로다",
     afterYesterdayMakeupWithTodayDone.lastAchievedDate === "2024-01-04"
   );
+
+  // 시나리오: 어제가 아니라 며칠 전(3일 전) 날짜도 소급 체크할 수 있다 — "어제까지만" 이라는 제한이
+  // 없어졌으므로, 그 날짜 하나만 콕 집어 history에 채워지고 그 날짜로 끝나는 연속 기록이 복구된다.
+  var challengeH = Object.assign({}, getDefaultChallenge(), {
+    startDate: "2024-01-01",
+    history: ["2024-01-01", "2024-01-02"],
+    currentStreak: 0,
+    bestStreak: 2,
+    lastAchievedDate: "2024-01-02",
+  });
+  var afterMultiDayMakeup = computeMarkDateAchieved(challengeH, "2024-01-03", "2024-01-07");
+  assert(
+    "오늘로부터 여러 날 전인 날짜도 소급 체크된다(어제 제한 없음)",
+    afterMultiDayMakeup.history.indexOf("2024-01-03") !== -1
+  );
+  assert(
+    "여러 날 전 소급 체크 후에도 그 날짜로 끝나는 연속 기록이 복구된다",
+    afterMultiDayMakeup.currentStreak === 3 && afterMultiDayMakeup.lastAchievedDate === "2024-01-03"
+  );
+
+  // 시나리오: 오늘 날짜나 미래 날짜는 소급 체크 대상이 아니다(방어적 가드).
+  var afterTodayAttempt = computeMarkDateAchieved(challengeH, "2024-01-07", "2024-01-07");
+  assert("오늘 날짜는 소급 체크되지 않는다", afterTodayAttempt.history.indexOf("2024-01-07") === -1);
+  var afterFutureAttempt = computeMarkDateAchieved(challengeH, "2024-01-08", "2024-01-07");
+  assert("미래 날짜는 소급 체크되지 않는다", afterFutureAttempt.history.indexOf("2024-01-08") === -1);
 
   // 시나리오: 습관 목표는 삭제되지 않고, 어제 이전에 체크된 완료 상태만 매일 초기화된다.
   var todosFromYesterday = [
@@ -1383,7 +1413,6 @@ function getHeatmapDayCount(challenge) {
 // 한 번 정해진 칸은 그대로 두고 다음 칸에 도장을 찍는 방식으로 앵커를 고정한다.
 function createHeatmapElement(challenge) {
   var today = todayStr();
-  var yesterday = addDays(today, -1);
   var dates = getChallengeDates(challenge.startDate, getHeatmapDayCount(challenge));
 
   var grid = document.createElement("div");
@@ -1397,12 +1426,13 @@ function createHeatmapElement(challenge) {
     if (dateStr === today) classes += " today";
     // 원래 targetDays 칸을 넘어 실패 때문에 연장된 칸은 다른 색으로 표시한다.
     if (index >= challenge.targetDays) classes += " bonus";
-    // 어제 체크를 깜빡했을 때 구제하는 소급 체크 칸: 어제 날짜이면서 아직 도장이 안 찍힌 경우에만.
-    var isMakeupAvailable = dateStr === yesterday && !achieved;
+    // 체크를 깜빡했을 때 구제하는 소급 체크 칸: 오늘보다 이전 날짜이면서 아직 도장이 안 찍힌 경우라면
+    // 하루 전이든 여러 날 전이든 관계없이 소급 체크 대상이 된다 ("어제까지만" 이라는 제한은 없음).
+    var isMakeupAvailable = !achieved && dayDiff(dateStr, today) > 0;
     if (isMakeupAvailable) classes += " makeup-available";
     cell.className = classes;
     cell.dataset.date = dateStr;
-    cell.title = isMakeupAvailable ? dateStr + " · 클릭하면 어제 달성으로 체크할 수 있어요" : dateStr;
+    cell.title = isMakeupAvailable ? dateStr + " · 클릭하면 이 날짜를 소급 달성으로 체크할 수 있어요" : dateStr;
     if (isMakeupAvailable) {
       cell.setAttribute("role", "button");
       cell.tabIndex = 0;
@@ -1556,7 +1586,8 @@ function renderChallenge() {
 }
 
 // 챌린지 영역에 이벤트를 위임해 붙인다 (렌더링마다 재등록되지 않도록 최초 1회만 호출).
-// 어제 소급 체크는 남용(실수로/충동적으로 누르는 것) 방지를 위해 관리자 비밀번호를 한 번 더 요구한다.
+// 소급 체크는 남용(실수로/충동적으로 누르는 것) 방지를 위해 관리자 비밀번호를 한 번 더 요구한다.
+// 하루가 지났든 여러 날이 지났든 제한 없이, 비밀번호만 맞으면 그 날짜를 소급 달성으로 인정한다.
 // 주의: 이 앱은 순수 클라이언트 정적 파일(app.js가 그대로 브라우저에 노출됨)이라 이 비밀번호는 실제
 // 보안이 아니다 — 제3자의 접근을 막는 용도가 아니라, 스스로 남용하지 않도록 두는 허들일 뿐이다.
 var YESTERDAY_MAKEUP_ADMIN_PASSWORD = "lovezia315";
@@ -1564,11 +1595,11 @@ var YESTERDAY_MAKEUP_ADMIN_PASSWORD = "lovezia315";
 function initChallengeEvents() {
   var container = document.getElementById("challenge-section");
 
-  function tryMarkYesterday(cell) {
+  function tryMarkDate(cell) {
     if (!cell || !cell.classList.contains("makeup-available")) return;
 
     var password = window.prompt(
-      "어제(" + cell.dataset.date + ") 소급 체크는 관리자 비밀번호가 필요합니다. 비밀번호를 입력하세요:"
+      cell.dataset.date + " 소급 체크는 관리자 비밀번호가 필요합니다. 비밀번호를 입력하세요:"
     );
     if (password === null) return; // 취소
     if (password !== YESTERDAY_MAKEUP_ADMIN_PASSWORD) {
@@ -1577,12 +1608,12 @@ function initChallengeEvents() {
     }
 
     var confirmed = window.confirm(
-      "어제(" + cell.dataset.date + ") 목표를 모두 달성하셨나요? 지금 체크하면 어제 칸에 도장이 찍히고 연속 기록도 이어집니다."
+      cell.dataset.date + " 목표를 모두 달성하셨나요? 지금 체크하면 해당 날짜 칸에 도장이 찍히고 연속 기록도 이어집니다."
     );
     if (!confirmed) return;
-    markYesterdayAchieved();
+    markDateAchieved(cell.dataset.date);
     renderAll();
-    showToast("어제 날짜에 도장을 찍었습니다.", "success");
+    showToast(cell.dataset.date + " 날짜에 도장을 찍었습니다.", "success");
   }
 
   container.addEventListener("click", function (e) {
@@ -1591,7 +1622,7 @@ function initChallengeEvents() {
       renderChallenge();
       return;
     }
-    tryMarkYesterday(e.target.closest(".heatmap-cell"));
+    tryMarkDate(e.target.closest(".heatmap-cell"));
   });
 
   container.addEventListener("keydown", function (e) {
@@ -1599,7 +1630,7 @@ function initChallengeEvents() {
     var cell = e.target.closest(".heatmap-cell");
     if (!cell || !cell.classList.contains("makeup-available")) return;
     e.preventDefault();
-    tryMarkYesterday(cell);
+    tryMarkDate(cell);
   });
 }
 
