@@ -976,6 +976,9 @@ var currentFilter = "all";
 // 챌린지 설정 폼이 열려 있는지 여부 (메모리에만 유지).
 var challengeSettingsOpen = false;
 
+// 히트맵에서 지난 날짜의 도장을 편집 중이면 그 날짜(YYYY-MM-DD), 아니면 null (메모리에만 유지).
+var editingStampDate = null;
+
 // 삭제 실행 취소 대기 상태 (5초 타이머 동안만 유효)
 var pendingDelete = null;
 var pendingDeleteTimer = null;
@@ -1154,6 +1157,14 @@ var STAMP_SHAPES = {
   heart: '<path d="M50 88 C14 62 4 38 22 22 C36 10 50 20 50 34 C50 20 64 10 78 22 C96 38 86 62 50 88 Z" />',
 };
 
+// 설정 폼(오늘 이후 도장)과 날짜별 도장 편집 폼(지난 날짜) 둘 다 같은 모양 목록을 쓴다.
+var STAMP_SHAPE_OPTIONS = [
+  { value: "circle", label: "원형" },
+  { value: "star", label: "별" },
+  { value: "ribbon", label: "리본" },
+  { value: "heart", label: "하트" },
+];
+
 // 히트맵 칸 안에 꽉 차게 들어가는 작은 도장 하나를 만든다 (달성한 날짜용). text는 사용자가 설정에서 직접 정한 문구.
 function createHeatmapStamp(shape, color, text) {
   var wrapper = document.createElement("div");
@@ -1303,12 +1314,7 @@ function createChallengeSettingsForm(challenge) {
   stampShapeLabel.textContent = "오늘 100% 달성 도장 모양";
   var stampShapeSelect = document.createElement("select");
   stampShapeSelect.id = "settings-stamp-shape";
-  [
-    { value: "circle", label: "원형" },
-    { value: "star", label: "별" },
-    { value: "ribbon", label: "리본" },
-    { value: "heart", label: "하트" },
-  ].forEach(function (opt) {
+  STAMP_SHAPE_OPTIONS.forEach(function (opt) {
     var optionEl = document.createElement("option");
     optionEl.value = opt.value;
     optionEl.textContent = opt.label;
@@ -1430,28 +1436,140 @@ function createHeatmapElement(challenge) {
     // 하루 전이든 여러 날 전이든 관계없이 소급 체크 대상이 된다 ("어제까지만" 이라는 제한은 없음).
     var isMakeupAvailable = !achieved && dayDiff(dateStr, today) > 0;
     if (isMakeupAvailable) classes += " makeup-available";
+    if (achieved) classes += " stamp-editable";
     cell.className = classes;
     cell.dataset.date = dateStr;
-    cell.title = isMakeupAvailable ? dateStr + " · 클릭하면 이 날짜를 소급 달성으로 체크할 수 있어요" : dateStr;
     if (isMakeupAvailable) {
+      cell.title = dateStr + " · 클릭하면 이 날짜를 소급 달성으로 체크할 수 있어요";
+    } else if (achieved) {
+      cell.title = dateStr + " · 클릭하면 이 날짜의 도장을 편집할 수 있어요";
+    } else {
+      cell.title = dateStr;
+    }
+    if (isMakeupAvailable || achieved) {
       cell.setAttribute("role", "button");
       cell.tabIndex = 0;
     }
     if (achieved) {
-      // stampLog에 그 날짜의 스냅샷이 있으면(달성 당시 도장 모양/색) 그걸 쓰고, 이 기능이 생기기 전에
-      // 찍힌 옛 날짜라 스냅샷이 없으면 현재 설정값으로 대체한다 — 그래야 설정에서 도장을 바꿔도 이미
-      // 찍힌 도장은 그대로 유지되고, 새로 찍는 도장부터만 바뀐다.
-      var stampInfo = challenge.stampLog[dateStr] || {
-        shape: challenge.stampShape,
-        color: challenge.stampColor,
-        text: challenge.stampText,
-      };
+      var stampInfo = getStampInfoForDate(challenge, dateStr);
       cell.appendChild(createHeatmapStamp(stampInfo.shape, stampInfo.color, stampInfo.text));
     }
     grid.appendChild(cell);
   });
 
   return grid;
+}
+
+// stampLog에 그 날짜의 스냅샷이 있으면(달성 당시, 혹은 이후 수동 편집된 도장 모양/색) 그걸 쓰고, 이 기능이
+// 생기기 전에 찍힌 옛 날짜라 스냅샷이 없으면 현재 설정값으로 대체한다 — 그래야 설정에서 도장을 바꿔도 이미
+// 찍힌 도장은 그대로 유지되고, 새로 찍는 도장부터만 바뀐다.
+function getStampInfoForDate(challenge, dateStr) {
+  return (
+    challenge.stampLog[dateStr] || {
+      shape: challenge.stampShape,
+      color: challenge.stampColor,
+      text: challenge.stampText,
+    }
+  );
+}
+
+// 히트맵에서 이미 도장이 찍힌(지난) 날짜를 클릭하면 나오는 편집 폼. 그날의 stampLog 항목만 바꾸므로
+// 다른 날짜의 도장이나 앞으로 새로 찍힐 도장(설정의 stampShape/stampColor/stampText)에는 영향이 없다.
+function createStampDayEditForm(dateStr, stampInfo) {
+  var form = document.createElement("div");
+  form.id = "stamp-day-edit-form";
+  form.className = "stamp-day-edit-form";
+
+  var heading = document.createElement("p");
+  heading.className = "stamp-day-edit-heading";
+  heading.textContent = formatKoreanDate(dateStr) + " 도장 편집";
+  form.appendChild(heading);
+
+  var preview = createHeatmapStamp(stampInfo.shape, stampInfo.color, stampInfo.text);
+  preview.classList.add("stamp-day-edit-preview");
+  form.appendChild(preview);
+
+  function refreshPreview() {
+    var next = createHeatmapStamp(shapeSelect.value, colorInput.value, textInput.value || "참 잘했어요!");
+    next.classList.add("stamp-day-edit-preview");
+    form.replaceChild(next, preview);
+    preview = next;
+  }
+
+  var shapeLabel = document.createElement("label");
+  shapeLabel.textContent = "도장 모양";
+  var shapeSelect = document.createElement("select");
+  shapeSelect.id = "stamp-day-shape";
+  STAMP_SHAPE_OPTIONS.forEach(function (opt) {
+    var optionEl = document.createElement("option");
+    optionEl.value = opt.value;
+    optionEl.textContent = opt.label;
+    shapeSelect.appendChild(optionEl);
+  });
+  shapeSelect.value = stampInfo.shape;
+  shapeSelect.addEventListener("change", refreshPreview);
+  shapeLabel.appendChild(shapeSelect);
+
+  var colorLabel = document.createElement("label");
+  colorLabel.textContent = "도장 색상";
+  var colorInput = document.createElement("input");
+  colorInput.type = "color";
+  colorInput.id = "stamp-day-color";
+  colorInput.value = stampInfo.color;
+  colorInput.addEventListener("input", refreshPreview);
+  colorLabel.appendChild(colorInput);
+
+  var textLabel = document.createElement("label");
+  textLabel.textContent = "도장 문구";
+  var textInput = document.createElement("input");
+  textInput.type = "text";
+  textInput.id = "stamp-day-text";
+  textInput.maxLength = 12;
+  textInput.value = stampInfo.text;
+  textInput.addEventListener("input", refreshPreview);
+  textLabel.appendChild(textInput);
+
+  var saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.id = "stamp-day-save-btn";
+  saveBtn.textContent = "저장";
+
+  var cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.id = "stamp-day-cancel-btn";
+  cancelBtn.textContent = "취소";
+
+  var actions = document.createElement("div");
+  actions.className = "stamp-day-edit-actions";
+  actions.appendChild(saveBtn);
+  actions.appendChild(cancelBtn);
+
+  form.appendChild(shapeLabel);
+  form.appendChild(colorLabel);
+  form.appendChild(textLabel);
+  form.appendChild(actions);
+
+  return form;
+}
+
+// "저장" 클릭 시 호출된다. 이 날짜의 stampLog 항목만 덮어쓸 뿐 currentStreak/history/settings의
+// stampShape 등은 건드리지 않으므로 renderChallenge()만으로 충분하고 renderAll()은 필요 없다.
+function saveStampDayEditFromInputs() {
+  if (!editingStampDate) return;
+
+  var shape = document.getElementById("stamp-day-shape").value;
+  var color = document.getElementById("stamp-day-color").value;
+  var text = document.getElementById("stamp-day-text").value.trim();
+  if (!text) return;
+
+  var challenge = loadChallenge();
+  challenge.stampLog[editingStampDate] = { shape: shape, color: color, text: text };
+  saveChallenge(challenge);
+
+  var editedDate = editingStampDate;
+  editingStampDate = null;
+  renderChallenge();
+  showToast(formatKoreanDate(editedDate) + " 도장을 바꿨습니다.", "success");
 }
 
 // 완료된 챌린지들을 "🏆 지난 기록" 뱃지 리스트로 보여준다. 최신 완료가 위로 오도록 역순으로 나열한다.
@@ -1566,6 +1684,14 @@ function renderChallenge() {
   container.appendChild(heatmapHeading);
   container.appendChild(createHeatmapElement(challenge));
 
+  // 편집 중이던 날짜가 (챌린지 초기화 등으로) 더 이상 달성 기록에 없으면 편집 폼을 조용히 닫는다.
+  if (editingStampDate && challenge.history.indexOf(editingStampDate) === -1) {
+    editingStampDate = null;
+  }
+  if (editingStampDate) {
+    container.appendChild(createStampDayEditForm(editingStampDate, getStampInfoForDate(challenge, editingStampDate)));
+  }
+
   var archive = loadChallengeArchive();
   if (archive.length > 0) {
     container.appendChild(createArchiveListElement(archive));
@@ -1616,19 +1742,45 @@ function initChallengeEvents() {
     showToast(cell.dataset.date + " 날짜에 도장을 찍었습니다.", "success");
   }
 
+  function openStampEditor(cell) {
+    if (!cell || !cell.classList.contains("stamp-editable")) return;
+    editingStampDate = cell.dataset.date;
+    renderChallenge();
+  }
+
   container.addEventListener("click", function (e) {
     if (e.target.id === "challenge-settings-btn" || e.target.id === "new-challenge-btn") {
       challengeSettingsOpen = true;
       renderChallenge();
       return;
     }
-    tryMarkDate(e.target.closest(".heatmap-cell"));
+    if (e.target.id === "stamp-day-save-btn") {
+      saveStampDayEditFromInputs();
+      return;
+    }
+    if (e.target.id === "stamp-day-cancel-btn") {
+      editingStampDate = null;
+      renderChallenge();
+      return;
+    }
+    var cell = e.target.closest(".heatmap-cell");
+    if (cell && cell.classList.contains("stamp-editable")) {
+      openStampEditor(cell);
+      return;
+    }
+    tryMarkDate(cell);
   });
 
   container.addEventListener("keydown", function (e) {
     if (e.key !== "Enter" && e.key !== " ") return;
     var cell = e.target.closest(".heatmap-cell");
-    if (!cell || !cell.classList.contains("makeup-available")) return;
+    if (!cell) return;
+    if (cell.classList.contains("stamp-editable")) {
+      e.preventDefault();
+      openStampEditor(cell);
+      return;
+    }
+    if (!cell.classList.contains("makeup-available")) return;
     e.preventDefault();
     tryMarkDate(cell);
   });

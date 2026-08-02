@@ -743,6 +743,9 @@ input[type="checkbox"] {
   font-weight: 700;
   font-size: 1.1rem;
 }
+.heatmap-cell.stamp-editable {
+  cursor: pointer;
+}
 .heatmap-cell:hover {
   transform: scale(1.15);
   z-index: 1;
@@ -777,6 +780,47 @@ input[type="checkbox"] {
   line-height: 1;
   padding: 0 8%;
   color: currentColor;
+}
+
+.stamp-day-edit-form {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 16px;
+  background: var(--bg-surface);
+  border-radius: var(--radius-md);
+}
+.stamp-day-edit-heading {
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+.stamp-day-edit-preview {
+  position: relative;
+  width: 84px;
+  height: 84px;
+  border-radius: var(--radius-sm);
+  background: #ffffff;
+}
+.stamp-day-edit-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-self: stretch;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+}
+.stamp-day-edit-actions {
+  display: flex;
+  gap: 8px;
+}
+#stamp-day-save-btn {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
 }
 
 .archive-section {
